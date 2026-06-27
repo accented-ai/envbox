@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	dockertypes "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/common"
@@ -280,6 +281,39 @@ func TestDocker(t *testing.T) {
 		err := cmd.ExecuteContext(ctx)
 		require.NoError(t, err)
 		require.True(t, called, "create function was not called")
+	})
+
+	t.Run("BootstrapDir", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cmd := clitest.New(t, "docker",
+			"--image=ubuntu",
+			"--username=root",
+			"--agent-token=hi",
+			"--boostrap-script=echo hi",
+		)
+
+		client := clitest.DockerClient(t, ctx)
+		var bootstrapDir string
+		client.ContainerExecCreateFn = func(_ context.Context, _ string, config container.ExecOptions) (common.IDResponse, error) {
+			if len(config.Cmd) == 2 && config.Cmd[0] == "/bin/sh" && config.Cmd[1] == "-s" {
+				require.Len(t, config.Env, 1)
+				bootstrapDir = strings.TrimPrefix(config.Env[0], "BINARY_DIR=")
+			}
+			return common.IDResponse{ID: "exec-id"}, nil
+		}
+		client.ContainerExecAttachFn = func(_ context.Context, _ string, _ container.ExecAttachOptions) (dockertypes.HijackedResponse, error) {
+			return dockertypes.HijackedResponse{
+				Reader: bufio.NewReader(strings.NewReader("root:x:0:0:root:/root:/bin/bash")),
+				Conn:   &writeBufferConn{},
+			}, nil
+		}
+
+		err := cmd.ExecuteContext(ctx)
+		require.NoError(t, err)
+		require.NotEmpty(t, bootstrapDir)
+		require.True(t, strings.HasPrefix(bootstrapDir, "/root/.coder/agent-"), bootstrapDir)
+		require.NotEqual(t, "/root/.coder", bootstrapDir)
 	})
 
 	// Test that we parse mounts correctly.
@@ -578,8 +612,9 @@ func TestDocker(t *testing.T) {
 			// trimming correctly when remapping host-mounted /usr/lib dirs to
 			// /usr/lib inside the container.
 			usrLibMountpoint = "/var/coder/usr/lib/"
-			// expectedUsrLibFiles are files that we expect to be returned as bind mounts.
-			expectedUsrLibFiles = []string{
+			// usrLibFiles are individual GPU library files. The GPU Operator
+			// should inject these via CDI, not envbox bind mounts.
+			usrLibFiles = []string{
 				filepath.Join(usrLibMountpoint, "nvidia", "libglxserver_nvidia.so"),
 				filepath.Join(usrLibMountpoint, "libnvidia-ml.so"),
 			}
@@ -601,7 +636,7 @@ func TestDocker(t *testing.T) {
 		ctx = xunix.WithEnvironFn(ctx, environ)
 
 		// Fake all the files.
-		for _, file := range append(expectedUsrLibFiles, procGPUDrivers...) {
+		for _, file := range append(usrLibFiles, procGPUDrivers...) {
 			_, err := afs.Create(file)
 			require.NoError(t, err)
 		}
@@ -630,7 +665,7 @@ func TestDocker(t *testing.T) {
 			})
 		}
 
-		_, err := afs.Create("/usr/local/nvidia")
+		err := afs.MkdirAll("/usr/local/nvidia", 0o755)
 		require.NoError(t, err)
 
 		unmounts := []string{}
@@ -660,9 +695,10 @@ func TestDocker(t *testing.T) {
 				// '/dev' is passed as a bind mount.
 				require.Contains(t, hostConfig.Binds, fmt.Sprintf("%s:%s", "/usr/local/nvidia", "/usr/local/nvidia"))
 
-				// Test that host /usr/lib bind mounts were passed through as read-only.
-				for _, file := range expectedUsrLibFiles {
-					require.Contains(t, hostConfig.Binds, fmt.Sprintf("%s:%s:ro",
+				// Test that host /usr/lib file mounts are skipped. The GPU
+				// Operator should inject these via CDI.
+				for _, file := range usrLibFiles {
+					require.NotContains(t, hostConfig.Binds, fmt.Sprintf("%s:%s:ro",
 						file,
 						strings.ReplaceAll(file, usrLibMountpoint, "/usr/lib/"),
 					))
@@ -740,6 +776,23 @@ func TestDocker(t *testing.T) {
 		execer.AssertCommandsCalled(t)
 	})
 }
+
+type writeBufferConn struct {
+	bytes.Buffer
+}
+
+func (c *writeBufferConn) Close() error                     { return nil }
+func (c *writeBufferConn) CloseWrite() error                { return nil }
+func (c *writeBufferConn) LocalAddr() net.Addr              { return testAddr("local") }
+func (c *writeBufferConn) RemoteAddr() net.Addr             { return testAddr("remote") }
+func (c *writeBufferConn) SetDeadline(time.Time) error      { return nil }
+func (c *writeBufferConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *writeBufferConn) SetWriteDeadline(time.Time) error { return nil }
+
+type testAddr string
+
+func (a testAddr) Network() string { return string(a) }
+func (a testAddr) String() string  { return string(a) }
 
 // rawDockerAuth is sample input for a kubernetes secret to a gcr.io private
 // registry.
