@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/stretchr/testify/require"
@@ -20,11 +21,12 @@ func TestShutdownInnerContainer(t *testing.T) {
 
 		var stopped bool
 		client := dockerfake.MockClient{
-			ContainerStopFn: func(_ context.Context, name string, options container.StopOptions) error {
+			ContainerStopFn: func(ctx context.Context, name string, options container.StopOptions) error {
 				stopped = true
+				requireContextDeadlineWithin(ctx, t, time.Duration(innerContainerStopTimeout)*time.Second+innerContainerStopContextSlack)
 				require.Equal(t, "container-id", name)
 				require.NotNil(t, options.Timeout)
-				require.Equal(t, 20, *options.Timeout)
+				require.Equal(t, innerContainerStopTimeout, *options.Timeout)
 				return nil
 			},
 			ContainerKillFn: func(context.Context, string, string) error {
@@ -70,4 +72,52 @@ func TestShutdownInnerContainer(t *testing.T) {
 		require.True(t, killed)
 		require.True(t, removed)
 	})
+}
+
+func TestShutdownBootstrapExecUsesStepDeadline(t *testing.T) {
+	t.Parallel()
+
+	var inspected bool
+	client := dockerfake.MockClient{
+		ContainerExecInspectFn: func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			inspected = true
+			require.Equal(t, "exec-id", execID)
+			requireContextDeadlineWithin(ctx, t, bootstrapExecShutdownTimeout)
+			return container.ExecInspect{}, xerrors.New("inspect failed")
+		},
+	}
+
+	log := slogtest.Make(t, &slogtest.Options{IgnoreErrors: true})
+
+	shutdownBootstrapExec(context.Background(), log, client, "exec-id")
+	require.True(t, inspected)
+}
+
+func TestShutdownDockerCVMUsesBoundedContext(t *testing.T) {
+	t.Parallel()
+
+	var stopped bool
+	client := dockerfake.MockClient{
+		ContainerStopFn: func(ctx context.Context, name string, options container.StopOptions) error {
+			stopped = true
+			require.Equal(t, "container-id", name)
+			require.NotNil(t, options.Timeout)
+			require.Equal(t, innerContainerStopTimeout, *options.Timeout)
+			requireContextDeadlineWithin(ctx, t, time.Duration(innerContainerStopTimeout)*time.Second+innerContainerStopContextSlack)
+			return nil
+		},
+	}
+
+	shutdownDockerCVM(slogtest.Make(t, nil), client, dockerCVMResult{containerID: "container-id"})
+	require.True(t, stopped)
+}
+
+func requireContextDeadlineWithin(ctx context.Context, t *testing.T, maximumDuration time.Duration) {
+	t.Helper()
+
+	deadline, ok := ctx.Deadline()
+	require.True(t, ok, "context must have a deadline")
+	remaining := time.Until(deadline)
+	require.Positive(t, remaining)
+	require.LessOrEqual(t, remaining, maximumDuration)
 }
