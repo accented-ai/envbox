@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -203,8 +204,69 @@ func TestShutdownDockerCVMUsesBoundedContext(t *testing.T) {
 		},
 	}
 
-	shutdownDockerCVM(slogtest.Make(t, nil), client, dockerCVMResult{containerID: "container-id"}, defaultInnerContainerStopTimeout)
+	shutdownDockerCVM(slogtest.Make(t, nil), client, dockerCVMResult{containerID: "container-id"}, defaultInnerContainerStopTimeout, dockerCVMProcesses{})
 	require.True(t, stopped)
+}
+
+func TestShutdownDockerCVMReapsOuterDaemonsInOrder(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	order := make([]string, 0, 4)
+	type observation struct {
+		deadline    time.Time
+		gracePeriod time.Duration
+	}
+	observations := make(map[string]observation)
+	record := func(name string) {
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, name)
+	}
+
+	client := dockerfake.MockClient{
+		ContainerStopFn: func(context.Context, string, container.StopOptions) error {
+			record("inner")
+			return nil
+		},
+	}
+	process := func(name string) managedProcess {
+		return fakeManagedProcess{stop: func(ctx context.Context, gracePeriod time.Duration) error {
+			deadline, _ := ctx.Deadline()
+			mu.Lock()
+			observations[name] = observation{deadline: deadline, gracePeriod: gracePeriod}
+			mu.Unlock()
+			record(name)
+			return nil
+		}}
+	}
+
+	shutdownDockerCVM(
+		slogtest.Make(t, nil),
+		client,
+		dockerCVMResult{containerID: "container-id"},
+		defaultInnerContainerStopTimeout,
+		dockerCVMProcesses{
+			dockerd:       process("dockerd"),
+			sysboxManager: process("sysbox-mgr"),
+			sysboxFS:      process("sysbox-fs"),
+		},
+	)
+
+	require.Len(t, order, 4)
+	require.Equal(t, []string{"inner", "dockerd"}, order[:2])
+	require.ElementsMatch(t, []string{"sysbox-mgr", "sysbox-fs"}, order[2:])
+	for name, maxTimeout := range map[string]time.Duration{
+		"dockerd":    outerDockerdShutdownTimeout,
+		"sysbox-mgr": outerSysboxShutdownTimeout,
+		"sysbox-fs":  outerSysboxShutdownTimeout,
+	} {
+		observed := observations[name]
+		require.False(t, observed.deadline.IsZero())
+		require.Positive(t, time.Until(observed.deadline))
+		require.LessOrEqual(t, time.Until(observed.deadline), maxTimeout)
+		require.Equal(t, outerDaemonGracePeriod, observed.gracePeriod)
+	}
 }
 
 func TestDockerdFallbackDataRootReason(t *testing.T) {
@@ -263,4 +325,12 @@ func requireContextDeadlineWithin(t *testing.T, ctx context.Context, max time.Du
 	remaining := time.Until(deadline)
 	require.Positive(t, remaining)
 	require.LessOrEqual(t, remaining, max)
+}
+
+type fakeManagedProcess struct {
+	stop func(context.Context, time.Duration) error
+}
+
+func (p fakeManagedProcess) Stop(ctx context.Context, gracePeriod time.Duration) error {
+	return p.stop(ctx, gracePeriod)
 }

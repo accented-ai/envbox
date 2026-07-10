@@ -164,8 +164,22 @@ type dockerCVMResult struct {
 	bootstrapExecID string
 }
 
+type managedProcess interface {
+	Stop(context.Context, time.Duration) error
+}
+
+type dockerCVMProcesses struct {
+	dockerd       managedProcess
+	sysboxManager managedProcess
+	sysboxFS      managedProcess
+}
+
 const (
 	dockerCVMShutdownTimeout         = 110 * time.Second
+	outerDockerdShutdownTimeout      = 5 * time.Second
+	outerSysboxShutdownTimeout       = 5 * time.Second
+	innerCVMShutdownTimeout          = dockerCVMShutdownTimeout - outerDockerdShutdownTimeout - outerSysboxShutdownTimeout
+	outerDaemonGracePeriod           = 2 * time.Second
 	bootstrapExecShutdownTimeout     = 30 * time.Second
 	defaultInnerContainerStopTimeout = 20 * time.Second
 	innerContainerAPICallTimeout     = 10 * time.Second
@@ -185,6 +199,11 @@ func dockerCmd(lifecycle *lifecycle) *cobra.Command {
 				log                         = slog.Make(slogjson.Sink(cmd.ErrOrStderr()), slogkubeterminate.Make()).Leveled(slog.LevelDebug)
 				blog        buildlog.Logger = buildlog.JSONLogger{Encoder: json.NewEncoder(os.Stderr)}
 			)
+			defer func() {
+				if err != nil {
+					cancel()
+				}
+			}()
 
 			// We technically leak a context here, but it's impact is negligible.
 			signalCtx, signalCancel := context.WithCancel(ctx)
@@ -252,19 +271,23 @@ func dockerCmd(lifecycle *lifecycle) *cobra.Command {
 				sysboxArgs = append(sysboxArgs, "--disable-idmapped-mount")
 			}
 
+			// Start sysbox-mgr and sysbox-fs in order to run sysbox containers.
+			sysboxManager := background.New(ctx, log, "sysbox-mgr", "sysbox-mgr", sysboxArgs...)
+			sysboxManagerWait := sysboxManager.Run()
+			sysboxFS := background.New(ctx, log, "sysbox-fs", "sysbox-fs")
+			sysboxFSWait := sysboxFS.Run()
+
 			go func() {
 				select {
-				// Start sysbox-mgr and sysbox-fs in order to run
-				// sysbox containers.
-				case err := <-background.New(ctx, log, "sysbox-mgr", "sysbox-mgr", sysboxArgs...).Run():
-					if ctx.Err() == nil {
+				case err, ok := <-sysboxManagerWait:
+					if ok && ctx.Err() == nil && !xerrors.Is(err, background.ErrUserKilled) {
 						blog.Info(sysboxErrMsg)
 						//nolint
 						log.Critical(ctx, "sysbox-mgr exited", slog.Error(err))
 						panic(err)
 					}
-				case err := <-background.New(ctx, log, "sysbox-fs", "sysbox-fs").Run():
-					if ctx.Err() == nil {
+				case err, ok := <-sysboxFSWait:
+					if ok && ctx.Err() == nil && !xerrors.Is(err, background.ErrUserKilled) {
 						blog.Info(sysboxErrMsg)
 						//nolint
 						log.Critical(ctx, "sysbox-fs exited", slog.Error(err))
@@ -312,7 +335,10 @@ func dockerCmd(lifecycle *lifecycle) *cobra.Command {
 			}
 
 			go func() {
-				err := <-dockerd.Wait()
+				err, ok := <-dockerd.Wait()
+				if !ok {
+					return
+				}
 				// It's possible the for the docker daemon to run out of disk
 				// while trying to startup, in such cases we should restart
 				// it and point it to an ephemeral directory. Since this
@@ -334,7 +360,7 @@ func dockerCmd(lifecycle *lifecycle) *cobra.Command {
 				// It's possible lower down in the call stack to restart
 				// the docker daemon if we run out of disk while starting the
 				// container.
-				if err != nil && !xerrors.Is(err, background.ErrUserKilled) {
+				if err != nil && !xerrors.Is(err, background.ErrUserKilled) && ctx.Err() == nil {
 					blog.Info("Failed to create Container-based Virtual Machine: " + err.Error())
 					//nolint
 					log.Fatal(ctx, "dockerd exited", slog.Error(err))
@@ -412,7 +438,11 @@ func dockerCmd(lifecycle *lifecycle) *cobra.Command {
 				<-signalCtx.Done()
 				log.Debug(ctx, "ctx canceled, shutting down docker CVM")
 
-				shutdownDockerCVM(log, client, result, flags.innerContainerStopTimeout)
+				shutdownDockerCVM(log, client, result, flags.innerContainerStopTimeout, dockerCVMProcesses{
+					dockerd:       dockerd,
+					sysboxManager: sysboxManager,
+					sysboxFS:      sysboxFS,
+				})
 			}()
 
 			return nil
@@ -846,17 +876,56 @@ func runDockerCVM(ctx context.Context, log slog.Logger, client dockerutil.Client
 	}, nil
 }
 
-func shutdownDockerCVM(log slog.Logger, client dockerutil.Client, result dockerCVMResult, innerContainerStopTimeout time.Duration) {
+func shutdownDockerCVM(log slog.Logger, client dockerutil.Client, result dockerCVMResult, innerContainerStopTimeout time.Duration, processes dockerCVMProcesses) {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), dockerCVMShutdownTimeout)
 	defer shutdownCancel()
 
 	log.Debug(shutdownCtx, "shutting down docker CVM", slog.F("timeout", dockerCVMShutdownTimeout))
-	shutdownBootstrapExec(shutdownCtx, log, client, result.bootstrapExecID)
-	if shutdownCtx.Err() != nil {
-		log.Error(shutdownCtx, "shutdown deadline exceeded before inner container shutdown", slog.Error(shutdownCtx.Err()))
+	innerCtx, innerCancel := context.WithTimeout(shutdownCtx, innerCVMShutdownTimeout)
+	shutdownBootstrapExec(innerCtx, log, client, result.bootstrapExecID)
+	if innerCtx.Err() != nil {
+		log.Error(innerCtx, "shutdown deadline exceeded before inner container shutdown", slog.Error(innerCtx.Err()))
+	} else {
+		shutdownInnerContainer(innerCtx, log, client, result.containerID, innerContainerStopTimeout)
+	}
+	innerCancel()
+
+	shutdownOuterDaemons(shutdownCtx, log, processes)
+}
+
+func shutdownOuterDaemons(ctx context.Context, log slog.Logger, processes dockerCVMProcesses) {
+	dockerdCtx, dockerdCancel := context.WithTimeout(ctx, outerDockerdShutdownTimeout)
+	stopManagedProcess(dockerdCtx, log, "dockerd", processes.dockerd)
+	dockerdCancel()
+
+	sysboxCtx, sysboxCancel := context.WithTimeout(ctx, outerSysboxShutdownTimeout)
+	defer sysboxCancel()
+
+	results := make(chan struct{}, 2)
+	for name, process := range map[string]managedProcess{
+		"sysbox-fs":  processes.sysboxFS,
+		"sysbox-mgr": processes.sysboxManager,
+	} {
+		go func() {
+			stopManagedProcess(sysboxCtx, log, name, process)
+			results <- struct{}{}
+		}()
+	}
+	<-results
+	<-results
+}
+
+func stopManagedProcess(ctx context.Context, log slog.Logger, name string, process managedProcess) {
+	if process == nil {
 		return
 	}
-	shutdownInnerContainer(shutdownCtx, log, client, result.containerID, innerContainerStopTimeout)
+
+	log.Debug(ctx, "stopping outer daemon", slog.F("process", name))
+	if err := process.Stop(ctx, outerDaemonGracePeriod); err != nil {
+		log.Error(ctx, "stop outer daemon", slog.F("process", name), slog.Error(err))
+		return
+	}
+	log.Debug(ctx, "outer daemon stopped and reaped", slog.F("process", name))
 }
 
 func shutdownBootstrapExec(ctx context.Context, log slog.Logger, client dockerutil.Client, bootstrapExecID string) {

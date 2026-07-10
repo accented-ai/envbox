@@ -82,6 +82,55 @@ func (d *Process) Run() <-chan error {
 	return d.Wait()
 }
 
+// Stop signals the process to exit, escalates to SIGKILL after gracePeriod,
+// and waits for the process to be reaped until ctx expires.
+func (d *Process) Stop(ctx context.Context, gracePeriod time.Duration) error {
+	d.mu.Lock()
+	process := d.cmd.OSProcess()
+	waitCh := d.waitCh
+	userKilled := d.userKilled
+	d.mu.Unlock()
+
+	if process == nil {
+		return xerrors.Errorf("cmd has not been started")
+	}
+
+	atomic.StoreInt64(userKilled, 1)
+	if err := process.Signal(syscall.SIGTERM); err != nil && !xerrors.Is(err, os.ErrProcessDone) {
+		return xerrors.Errorf("signal SIGTERM: %w", err)
+	}
+
+	graceTimer := time.NewTimer(gracePeriod)
+	defer graceTimer.Stop()
+
+	select {
+	case err, ok := <-waitCh:
+		return stoppedProcessError(err, ok)
+	case <-graceTimer.C:
+	case <-ctx.Done():
+		_ = process.Signal(syscall.SIGKILL)
+		return ctx.Err()
+	}
+
+	if err := process.Signal(syscall.SIGKILL); err != nil && !xerrors.Is(err, os.ErrProcessDone) {
+		return xerrors.Errorf("signal SIGKILL: %w", err)
+	}
+
+	select {
+	case err, ok := <-waitCh:
+		return stoppedProcessError(err, ok)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func stoppedProcessError(err error, ok bool) error {
+	if !ok || err == nil || xerrors.Is(err, ErrUserKilled) {
+		return nil
+	}
+	return err
+}
+
 // Restart kill the running process and reruns the command with the updated
 // binName, cmd and args. See New for the meaning of binName.
 func (d *Process) Restart(ctx context.Context, binName, cmd string, args ...string) error {
@@ -199,6 +248,13 @@ func (d *Process) kill(sig syscall.Signal) error {
 
 		select {
 		case <-d.ctx.Done():
+			exited, err := isProcExited(fs, pid, d.binName)
+			if err != nil {
+				return xerrors.Errorf("is proc cmd after context cancellation: %w", err)
+			}
+			if exited {
+				return nil
+			}
 			return d.ctx.Err()
 		case <-ticker.C:
 		}
@@ -212,7 +268,7 @@ func (d *Process) kill(sig syscall.Signal) error {
 // that the PID may be reclaimed and reused for a separate process.
 func isProcExited(fs afero.Fs, pid int, cmd string) (bool, error) {
 	cmdline, err := afero.ReadFile(fs, fmt.Sprintf("/proc/%d/cmdline", pid))
-	if xerrors.Is(err, os.ErrNotExist) {
+	if xerrors.Is(err, os.ErrNotExist) || xerrors.Is(err, syscall.ESRCH) {
 		return true, nil
 	}
 	if err != nil {
