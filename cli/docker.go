@@ -208,6 +208,10 @@ func dockerCmd(lifecycle *lifecycle) *cobra.Command {
 					cancel()
 				}
 			}()
+			if flags.noStartupLogs {
+				log = slog.Make(slogjson.Sink(io.Discard))
+				blog = buildlog.NopLogger{}
+			}
 
 			// We technically leak a context here, but it's impact is negligible.
 			signalCtx, signalCancel := context.WithCancel(ctx)
@@ -221,11 +225,6 @@ func dockerCmd(lifecycle *lifecycle) *cobra.Command {
 				<-sigs
 				log.Info(ctx, "got signal, canceling context")
 			}()
-
-			if flags.noStartupLogs {
-				log = slog.Make(slogjson.Sink(io.Discard))
-				blog = buildlog.NopLogger{}
-			}
 
 			httpClient, err := xhttp.Client(log, flags.extraCertsPath)
 			if err != nil {
