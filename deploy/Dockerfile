@@ -1,3 +1,40 @@
+ARG SYSBOX_VERSION="0.7.0"
+
+FROM golang:1.24-bookworm AS sysbox-fs-builder
+
+ARG SYSBOX_FS_COMMIT
+ARG SYSBOX_VERSION
+ARG TARGETARCH
+
+RUN apt-get update && \
+  apt-get install --no-install-recommends --yes \
+    git \
+    libprotobuf-dev \
+    libseccomp-dev \
+    make \
+    pkg-config \
+    protobuf-compiler && \
+  go install github.com/golang/protobuf/protoc-gen-go@v1.5.4 && \
+  ln -s /usr/include/google /usr/local/include/google && \
+  rm -rf /var/lib/apt/lists/* && \
+  git clone \
+    --branch "v$SYSBOX_VERSION" \
+    --depth 1 \
+    --recurse-submodules \
+    --shallow-submodules \
+    https://github.com/nestybox/sysbox.git \
+    /src/sysbox && \
+  rm -rf /src/sysbox/sysbox-fs
+
+COPY --from=sysbox-fs / /src/sysbox/sysbox-fs
+
+RUN make -C /src/sysbox/sysbox-ipc sysbox-ipc && \
+  make -C /src/sysbox/sysbox-fs \
+  COMMIT="$SYSBOX_FS_COMMIT" \
+  EDITION="Community Edition (CE)" \
+  VERSION="$SYSBOX_VERSION" \
+  TARGET_ARCH="$TARGETARCH"
+
 # Ubuntu 22.04 LTS (Jammy Jellyfish)
 FROM ubuntu:jammy
 
@@ -6,7 +43,7 @@ ARG TARGETARCH
 # We don't hardcode it here because we have to be able to build both
 # amd and arm
 ARG SYSBOX_SHA
-ARG SYSBOX_VERSION="0.7.0"
+ARG SYSBOX_VERSION
 ARG SYSBOX_DEB="sysbox-ce_$SYSBOX_VERSION-0.linux_$TARGETARCH.deb"
 
 # Copy configuration files to appropriate locations
@@ -59,6 +96,8 @@ RUN wget https://downloads.nestybox.com/sysbox/releases/v$SYSBOX_VERSION/$SYSBOX
   apt install -y "./$SYSBOX_DEB" && \
   rm "./$SYSBOX_DEB" && \
   userdel -r sysbox
+
+COPY --from=sysbox-fs-builder /src/sysbox/sysbox-fs/build/$TARGETARCH/sysbox-fs /usr/bin/sysbox-fs
 
 # This is jank but sysbox adds their own /etc/docker/daemon.json that overwrites ours when it gets installed,
 # so we copy over their changes to get the configurations we actually want.

@@ -4,6 +4,9 @@ EMBED_FILES := cli/wrap_dockerd.sh
 IMAGE_FILES := $(shell find deploy)
 ARCH ?= linux/$(shell go env GOARCH)
 SYSBOX_SHA ?= $(shell ./scripts/sysbox_sha.sh $(ARCH))
+SYSBOX_FS_COMMIT := 2ba75d39ed657988258d5fa53e50599028fd844e
+SYSBOX_FS_DIR ?= ../sysbox-fs
+SYSBOX_FS_REPO ?= https://github.com/accented-ai/sysbox-fs.git
 GOOS := $(word 1,$(subst /, ,$(ARCH)))
 GOARCH := $(word 2,$(subst /, ,$(ARCH)))
 
@@ -19,11 +22,19 @@ build/envbox: $(GO_FILES) $(EMBED_FILES)
 .PHONY: build/image/envbox
 build/image/envbox: build/image/envbox/$(GOOS)_$(GOARCH)/.ctx
 
-build/image/envbox/$(GOOS)_$(GOARCH)/.ctx: build/envbox $(IMAGE_FILES) scripts/sysbox_sha.sh
+build/image/envbox/$(GOOS)_$(GOARCH)/.ctx: Makefile build/envbox $(IMAGE_FILES) scripts/sysbox_fs_context.sh scripts/sysbox_sha.sh
 	rm -rf $(@D)
 	mkdir -p $(@D)
 	cp -r build/envbox deploy/. $(@D)
-	docker buildx build --build-arg SYSBOX_SHA=$(SYSBOX_SHA) --load -t envbox --platform $(ARCH) $(@D)
+	sysbox_fs_context="$$(SYSBOX_FS_COMMIT=$(SYSBOX_FS_COMMIT) SYSBOX_FS_DIR=$(SYSBOX_FS_DIR) SYSBOX_FS_REPO=$(SYSBOX_FS_REPO) ./scripts/sysbox_fs_context.sh)"; \
+		docker buildx build \
+			--build-arg SYSBOX_FS_COMMIT=$(SYSBOX_FS_COMMIT) \
+			--build-arg SYSBOX_SHA=$(SYSBOX_SHA) \
+			--build-context "sysbox-fs=$$sysbox_fs_context" \
+			--load \
+			-t envbox \
+			--platform $(ARCH) \
+			$(@D)
 	touch $@
 
 .PHONY: fmt
