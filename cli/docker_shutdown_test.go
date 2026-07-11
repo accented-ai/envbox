@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -206,6 +208,29 @@ func TestShutdownDockerCVMUsesBoundedContext(t *testing.T) {
 
 	shutdownDockerCVM(slogtest.Make(t, nil), client, dockerCVMResult{containerID: "container-id"}, defaultInnerContainerStopTimeout, dockerCVMProcesses{})
 	require.True(t, stopped)
+}
+
+func TestShutdownDockerCVMRemovesBootstrapDir(t *testing.T) {
+	t.Parallel()
+
+	bootstrapDir := filepath.Join(t.TempDir(), "agent-test")
+	require.NoError(t, os.Mkdir(bootstrapDir, 0o755))
+	client := dockerfake.MockClient{
+		ContainerStopFn: func(context.Context, string, container.StopOptions) error {
+			return nil
+		},
+	}
+
+	shutdownDockerCVM(
+		slogtest.Make(t, nil),
+		client,
+		dockerCVMResult{containerID: "container-id", bootstrapHostDir: bootstrapDir},
+		defaultInnerContainerStopTimeout,
+		dockerCVMProcesses{},
+	)
+
+	_, err := os.Stat(bootstrapDir)
+	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
 func TestShutdownDockerCVMReapsOuterDaemonsInOrder(t *testing.T) {

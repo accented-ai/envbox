@@ -160,8 +160,9 @@ type flags struct {
 }
 
 type dockerCVMResult struct {
-	containerID     string
-	bootstrapExecID string
+	containerID      string
+	bootstrapExecID  string
+	bootstrapHostDir string
 }
 
 type managedProcess interface {
@@ -185,6 +186,9 @@ const (
 	innerContainerAPICallTimeout     = 10 * time.Second
 	innerContainerStopContextSlack   = 5 * time.Second
 	innerContainerForceCleanupBudget = 2 * innerContainerAPICallTimeout
+	bootstrapDirCleanupTimeout       = 5 * time.Second
+	staleBootstrapDirAge             = 24 * time.Hour
+	bootstrapDirsToKeep              = 2
 )
 
 func dockerCmd(lifecycle *lifecycle) *cobra.Command {
@@ -784,26 +788,6 @@ func runDockerCVM(ctx context.Context, log slog.Logger, client dockerutil.Client
 		return dockerCVMResult{}, xerrors.Errorf("start container: %w", err)
 	}
 
-	log.Debug(ctx, "creating bootstrap directory", slog.F("directory", imgMeta.HomeDir))
-
-	// Keep Coder assets under the user's home directory because systemd can
-	// remount /tmp while the bootstrap script is downloading the agent. Use a
-	// unique leaf directory so a replacement workspace never overwrites an
-	// agent binary still being executed by a stuck old pod.
-	assetsDir := filepath.Join(imgMeta.HomeDir, ".coder")
-	bootDir := filepath.Join(assetsDir, fmt.Sprintf("agent-%d-%d", time.Now().UnixNano(), os.Getpid()))
-
-	blog.Infof("Creating %q directory to host Coder assets...", bootDir)
-	_, err = dockerutil.ExecContainer(ctx, client, dockerutil.ExecConfig{
-		ContainerID: containerID,
-		User:        imgMeta.UID,
-		Cmd:         "mkdir",
-		Args:        []string{"-p", bootDir},
-	})
-	if err != nil {
-		return dockerCVMResult{}, xerrors.Errorf("make bootstrap dir: %w", err)
-	}
-
 	cpuQuota, err := xunix.ReadCPUQuota(ctx, log)
 	if err != nil {
 		blog.Infof("Unable to read CPU quota: %s", err.Error())
@@ -827,6 +811,42 @@ func runDockerCVM(ctx context.Context, log slog.Logger, client dockerutil.Client
 		return dockerCVMResult{containerID: containerID}, nil
 	}
 	blog.Infof("Bootstrapping workspace...")
+
+	// Keep Coder assets under the user's home directory because systemd can
+	// remount /tmp while the bootstrap script is downloading the agent. Use a
+	// unique leaf directory so a replacement workspace never overwrites an
+	// agent binary still being executed by a stuck old pod.
+	assetsDir := filepath.Join(imgMeta.HomeDir, ".coder")
+	bootDir := filepath.Join(assetsDir, fmt.Sprintf("agent-%d-%d", time.Now().UnixNano(), os.Getpid()))
+	bootstrapHostDir := ""
+	if assetsHostDir, ok := hostPathForInnerPath(assetsDir, mounts); ok {
+		bootstrapHostDir = filepath.Join(assetsHostDir, filepath.Base(bootDir))
+		pruneCtx, pruneCancel := context.WithTimeout(ctx, bootstrapDirCleanupTimeout)
+		if err := pruneBootstrapDirs(pruneCtx, assetsHostDir, time.Now()); err != nil {
+			log.Warn(ctx, "prune stale bootstrap directories", slog.Error(err), slog.F("directory", assetsHostDir))
+		}
+		pruneCancel()
+	}
+
+	blog.Infof("Creating %q directory to host Coder assets...", bootDir)
+	_, err = dockerutil.ExecContainer(ctx, client, dockerutil.ExecConfig{
+		ContainerID: containerID,
+		User:        imgMeta.UID,
+		Cmd:         "mkdir",
+		Args:        []string{"-p", bootDir},
+	})
+	if err != nil {
+		return dockerCVMResult{}, xerrors.Errorf("make bootstrap dir: %w", err)
+	}
+
+	cleanupBootstrapOnError := true
+	defer func() {
+		if cleanupBootstrapOnError {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), bootstrapDirCleanupTimeout)
+			defer cleanupCancel()
+			_ = removeBootstrapDir(cleanupCtx, bootstrapHostDir)
+		}
+	}()
 
 	bootstrapExec, err := client.ContainerExecCreate(ctx, containerID, container.ExecOptions{
 		User:         imgMeta.UID,
@@ -870,9 +890,11 @@ func runDockerCVM(ctx context.Context, log slog.Logger, client dockerutil.Client
 		log.Debug(ctx, "bootstrap output copied")
 	}()
 
+	cleanupBootstrapOnError = false
 	return dockerCVMResult{
-		containerID:     containerID,
-		bootstrapExecID: bootstrapExec.ID,
+		containerID:      containerID,
+		bootstrapExecID:  bootstrapExec.ID,
+		bootstrapHostDir: bootstrapHostDir,
 	}, nil
 }
 
@@ -886,7 +908,14 @@ func shutdownDockerCVM(log slog.Logger, client dockerutil.Client, result dockerC
 	if innerCtx.Err() != nil {
 		log.Error(innerCtx, "shutdown deadline exceeded before inner container shutdown", slog.Error(innerCtx.Err()))
 	} else {
-		shutdownInnerContainer(innerCtx, log, client, result.containerID, innerContainerStopTimeout)
+		stopped := shutdownInnerContainer(innerCtx, log, client, result.containerID, innerContainerStopTimeout)
+		if stopped && result.bootstrapHostDir != "" {
+			cleanupCtx, cleanupCancel := context.WithTimeout(innerCtx, bootstrapDirCleanupTimeout)
+			if err := removeBootstrapDir(cleanupCtx, result.bootstrapHostDir); err != nil {
+				log.Error(cleanupCtx, "remove bootstrap directory", slog.Error(err), slog.F("directory", result.bootstrapHostDir))
+			}
+			cleanupCancel()
+		}
 	}
 	innerCancel()
 
@@ -962,10 +991,10 @@ func shutdownBootstrapExec(ctx context.Context, log slog.Logger, client dockerut
 	log.Debug(shutdownCtx, "bootstrap process successfully exited")
 }
 
-func shutdownInnerContainer(ctx context.Context, log slog.Logger, client dockerutil.Client, containerID string, innerContainerStopTimeout time.Duration) {
+func shutdownInnerContainer(ctx context.Context, log slog.Logger, client dockerutil.Client, containerID string, innerContainerStopTimeout time.Duration) bool {
 	if containerID == "" {
 		log.Debug(ctx, "no inner container id, skipping container shutdown")
-		return
+		return false
 	}
 
 	var err error
@@ -978,7 +1007,7 @@ func shutdownInnerContainer(ctx context.Context, log slog.Logger, client dockeru
 		err = client.ContainerStop(stopCtx, containerID, container.StopOptions{Timeout: &stopSeconds})
 		if err == nil || errdefs.IsNotFound(err) {
 			log.Debug(stopCtx, "inner container stopped", slog.F("container_id", containerID))
-			return
+			return true
 		}
 		log.Error(stopCtx, "stop inner container", slog.Error(err), slog.F("container_id", containerID))
 	} else {
@@ -990,6 +1019,7 @@ func shutdownInnerContainer(ctx context.Context, log slog.Logger, client dockeru
 
 	log.Debug(killCtx, "force killing inner container", slog.F("container_id", containerID))
 	err = client.ContainerKill(killCtx, containerID, "SIGKILL")
+	stopped := err == nil || errdefs.IsNotFound(err)
 	if err != nil && !errdefs.IsNotFound(err) {
 		log.Error(killCtx, "kill inner container", slog.Error(err), slog.F("container_id", containerID))
 	}
@@ -1003,9 +1033,90 @@ func shutdownInnerContainer(ctx context.Context, log slog.Logger, client dockeru
 	})
 	if err != nil && !errdefs.IsNotFound(err) {
 		log.Error(removeCtx, "remove inner container", slog.Error(err), slog.F("container_id", containerID))
-		return
+		return stopped
 	}
 	log.Debug(removeCtx, "inner container removed", slog.F("container_id", containerID))
+	return true
+}
+
+func hostPathForInnerPath(innerPath string, mounts []xunix.Mount) (string, bool) {
+	innerPath = filepath.Clean(innerPath)
+	bestMountpoint := ""
+	bestSource := ""
+	bestRelativePath := ""
+	for _, mount := range mounts {
+		mountpoint := filepath.Clean(mount.Mountpoint)
+		relativePath, err := filepath.Rel(mountpoint, innerPath)
+		if mount.ReadOnly || err != nil || relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) {
+			continue
+		}
+		if len(mountpoint) > len(bestMountpoint) {
+			bestMountpoint = mountpoint
+			bestSource = mount.Source
+			bestRelativePath = relativePath
+		}
+	}
+	if bestMountpoint == "" {
+		return "", false
+	}
+	return filepath.Join(bestSource, bestRelativePath), true
+}
+
+func pruneBootstrapDirs(ctx context.Context, assetsDir string, now time.Time) error {
+	entries, err := os.ReadDir(assetsDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return xerrors.Errorf("read bootstrap directory: %w", err)
+	}
+
+	type bootstrapDir struct {
+		path    string
+		modTime time.Time
+	}
+	dirs := make([]bootstrapDir, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "agent-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return xerrors.Errorf("stat bootstrap directory %q: %w", entry.Name(), err)
+		}
+		dirs = append(dirs, bootstrapDir{path: filepath.Join(assetsDir, entry.Name()), modTime: info.ModTime()})
+	}
+	sort.Slice(dirs, func(i, j int) bool {
+		return dirs[i].modTime.After(dirs[j].modTime)
+	})
+
+	for i, dir := range dirs {
+		if i < bootstrapDirsToKeep || now.Sub(dir.modTime) < staleBootstrapDirAge {
+			continue
+		}
+		if err := removeBootstrapDir(ctx, dir.path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func removeBootstrapDir(ctx context.Context, dir string) error {
+	if dir == "" {
+		return nil
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- os.RemoveAll(dir)
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func boundedStopSeconds(ctx context.Context, requested time.Duration) int {
