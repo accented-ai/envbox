@@ -73,6 +73,58 @@ func TestDocker(t *testing.T) {
 		_ = runEnvbox()
 	})
 
+	t.Run("ConcurrentNestedContainerLifecycle", func(t *testing.T) {
+		t.Parallel()
+
+		pool, err := dockertest.NewPool("")
+		require.NoError(t, err)
+
+		resource := integrationtest.RunEnvbox(t, pool, &integrationtest.CreateDockerCVMConfig{
+			Image:       integrationtest.DockerdImage,
+			Username:    "root",
+			OuterMounts: integrationtest.DefaultBinds(t, integrationtest.TmpDir(t)),
+		})
+		integrationtest.WaitForCVMDocker(t, pool, resource, time.Minute)
+
+		_, err = integrationtest.ExecInnerContainer(t, pool, integrationtest.ExecConfig{
+			ContainerID: resource.Container.ID,
+			Cmd:         []string{"docker", "pull", integrationtest.HelloWorldImage},
+		})
+		require.NoError(t, err)
+
+		stressScript := fmt.Sprintf(`set -eu
+for round in $(seq 1 5); do
+	pids=""
+	for slot in $(seq 1 16); do
+		docker run --rm --name "envbox-fuse-${round}-${slot}" %q >/dev/null &
+		pids="${pids} $!"
+	done
+	for pid in ${pids}; do
+		wait "${pid}"
+	done
+done
+cat /proc/sys/kernel/threads-max >/dev/null
+`, integrationtest.HelloWorldImage)
+
+		_, err = integrationtest.ExecInnerContainer(t, pool, integrationtest.ExecConfig{
+			ContainerID: resource.Container.ID,
+			Cmd:         []string{"/bin/sh", "-c", stressScript},
+		})
+		require.NoError(t, err)
+
+		waiting, err := integrationtest.ExecEnvbox(t, pool, integrationtest.ExecConfig{
+			ContainerID: resource.Container.ID,
+			Cmd: []string{"/bin/sh", "-c", `connection=$(docker exec workspace_cvm awk '$0 ~ / \/proc\/sys .* - fuse sysboxfs / { split($3, device, ":"); print device[2]; exit }' /proc/self/mountinfo)
+test -n "${connection}"
+cat "/sys/fs/fuse/connections/${connection}/waiting"`},
+		})
+		require.NoError(t, err)
+		require.Equal(t, "0", strings.TrimSpace(string(waiting)))
+
+		integrationtest.StopContainer(t, pool, resource.Container.ID, 30*time.Second)
+		require.NoError(t, resource.Close())
+	})
+
 	// EnvboxArgs validates that arguments passed to envbox function correctly.
 	// Most cases should be covered with unit tests, the intent with this is to
 	// test cases that do not garner a high degree of confidence from mocking

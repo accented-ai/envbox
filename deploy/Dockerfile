@@ -1,6 +1,6 @@
 ARG SYSBOX_VERSION="0.7.0"
 
-FROM golang:1.24-bookworm AS sysbox-fs-builder
+FROM golang:1.25-bookworm AS sysbox-fs-builder
 
 ARG SYSBOX_FS_COMMIT
 ARG SYSBOX_VERSION
