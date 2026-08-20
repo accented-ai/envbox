@@ -375,26 +375,29 @@ All configuration uses `CODER_*` prefixed environment variables. See README.md f
 
 ### Go Dependencies
 
-- **Go 1.24+** required (see `go.mod`)
+- **Go 1.24+** required for Envbox (see `go.mod`); the pinned Sysbox source build uses Go 1.25
 - **Docker API client** pinned to specific version (avoid breaking changes)
 - **coder/coder v2.14.4** - Main Coder integration
 - **coder/tailscale fork** - Not important to agents; version should match coder/coder's go.mod
-- **sysbox 0.6.7** - Exact version with SHA pinned in Makefile
+- **sysbox 0.7.0** - Release commit, sibling gitlinks, and package checksums pinned in `deploy/sysbox-source.lock`
 
 ### Docker and System Dependencies
 
-- **Docker CE 27.3.1** - Pinned in Dockerfile
-- **sysbox 0.6.7** - Downloaded and verified via SHA256 in Dockerfile
+- **Docker CE 29.2.1** - Pinned in Dockerfile
+- **sysbox 0.7.0** - Downloaded and verified via SHA256 in Dockerfile
 - **Linux kernel** - Requires seccomp API level >= 5
 - **Ubuntu 22.04 (Jammy)** - Base image
 
 ### Version Management
 
 **Updating sysbox:**
-1. Update `SYSBOX_VERSION` in Makefile
-2. Update `SYSBOX_SHA` in Makefile (get from nestybox releases)
-3. Update both `ARG` values in deploy/Dockerfile
-4. Test thoroughly with integration tests
+
+1. Run `make update/sysbox-source-lock SYSBOX_VERSION=<version>`.
+2. Review the generated release commit, sibling gitlinks, and package checksums in `deploy/sysbox-source.lock`.
+3. Run `make check/sysbox-source-lock` and build both supported architectures.
+4. Test thoroughly with integration tests.
+
+Updating only the downstream sysbox-fs fork does not regenerate the release lock; change `SYSBOX_FS_COMMIT` in the Makefile instead.
 
 **Updating coder/coder dependency:**
 1. Check coder/coder's go.mod for tailscale version

@@ -1,4 +1,4 @@
-ARG SYSBOX_VERSION="0.7.0"
+ARG SYSBOX_VERSION
 
 FROM golang:1.25-bookworm AS sysbox-fs-builder
 
@@ -8,7 +8,6 @@ ARG TARGETARCH
 
 RUN apt-get update && \
   apt-get install --no-install-recommends --yes \
-    git \
     libprotobuf-dev \
     libseccomp-dev \
     make \
@@ -16,16 +15,11 @@ RUN apt-get update && \
     protobuf-compiler && \
   go install github.com/golang/protobuf/protoc-gen-go@v1.5.4 && \
   ln -s /usr/include/google /usr/local/include/google && \
-  rm -rf /var/lib/apt/lists/* && \
-  git clone \
-    --branch "v$SYSBOX_VERSION" \
-    --depth 1 \
-    --recurse-submodules \
-    --shallow-submodules \
-    https://github.com/nestybox/sysbox.git \
-    /src/sysbox && \
-  rm -rf /src/sysbox/sysbox-fs
+  rm -rf /var/lib/apt/lists/*
 
+COPY --from=sysbox-ipc / /src/sysbox/sysbox-ipc
+COPY --from=sysbox-libs / /src/sysbox/sysbox-libs
+COPY --from=sysbox-runc / /src/sysbox/sysbox-runc
 COPY --from=sysbox-fs / /src/sysbox/sysbox-fs
 
 RUN make -C /src/sysbox/sysbox-ipc sysbox-ipc && \
@@ -39,9 +33,7 @@ RUN make -C /src/sysbox/sysbox-ipc sysbox-ipc && \
 FROM ubuntu:jammy
 
 ARG TARGETARCH
-# This should be updated in the Makefile whenever the version is changed.
-# We don't hardcode it here because we have to be able to build both
-# amd and arm
+# Supplied from the generated release lock for the selected architecture.
 ARG SYSBOX_SHA
 ARG SYSBOX_VERSION
 ARG SYSBOX_DEB="sysbox-ce_$SYSBOX_VERSION-0.linux_$TARGETARCH.deb"
