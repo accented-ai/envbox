@@ -3,6 +3,8 @@ GO_SOURCE_FILES := $(shell git ls-files '*.go')
 GO_FILES := $(shell git ls-files '*.go' '*.sum')
 EMBED_FILES := cli/wrap_dockerd.sh
 IMAGE_FILES := $(shell find deploy)
+IMAGE_OUTPUT ?= --load
+IMAGE_TAG ?= envbox
 ARCH ?= linux/$(shell go env GOARCH)
 GOOS := $(word 1,$(subst /, ,$(ARCH)))
 GOARCH := $(word 2,$(subst /, ,$(ARCH)))
@@ -49,8 +51,8 @@ build/image/envbox/$(GOOS)_$(GOARCH)/.ctx: Makefile build/envbox $(IMAGE_FILES) 
 			--build-context "sysbox-ipc=$$sysbox_ipc_context" \
 			--build-context "sysbox-libs=$$sysbox_libs_context" \
 			--build-context "sysbox-runc=$$sysbox_runc_context" \
-			--load \
-			-t envbox \
+			$(IMAGE_OUTPUT) \
+			--tag $(IMAGE_TAG) \
 			--platform $(ARCH) \
 			$(@D)
 	touch $@
