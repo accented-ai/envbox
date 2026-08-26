@@ -43,6 +43,18 @@ To learn more about Coder Templates refer to the [docs](https://coder.com/docs/v
 
 It is not possible to develop `envbox` effectively using a containerized environment (includes developing `envbox` using `envbox`). A VM, personal machine, or similar environment is required to run the [integration](./integration/) test suite.
 
+`make build/image/envbox` loads the selected architecture into the local Docker daemon as `envbox` by default. Set `IMAGE_OUTPUT=--push` and `IMAGE_TAG` to publish an architecture-specific image through the active Buildx builder:
+
+```shell
+make clean
+make ARCH=linux/arm64 \
+  IMAGE_OUTPUT=--push \
+  IMAGE_TAG=registry.example.com/envbox:test-arm64 \
+  build/image/envbox
+```
+
+Clean between architectures because the cross-compiled Envbox binary has a shared build path. Publish each architecture under an immutable temporary tag, then create the multi-architecture tag from those manifests.
+
 ## CODER_IMAGE_PULL_SECRET Kubernetes Example
 
 If a login is required to pull images from a private repository, create a secret following the instructions from the [Kubernetes Documentation](https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/#create-a-secret-by-providing-credentials-on-the-command-line) as such:
