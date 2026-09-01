@@ -198,9 +198,13 @@ func dockerCmd(lifecycle *lifecycle) *cobra.Command {
 		Use:   "docker",
 		Short: "Create a docker-based CVM",
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
+			logLevel := slog.LevelInfo
+			if flags.debug {
+				logLevel = slog.LevelDebug
+			}
 			var (
 				ctx, cancel                 = context.WithCancel(cmd.Context()) //nolint
-				log                         = slog.Make(slogjson.Sink(cmd.ErrOrStderr()), slogkubeterminate.Make()).Leveled(slog.LevelDebug)
+				log                         = slog.Make(slogjson.Sink(cmd.ErrOrStderr()), slogkubeterminate.Make()).Leveled(logLevel)
 				blog        buildlog.Logger = buildlog.JSONLogger{Encoder: json.NewEncoder(os.Stderr)}
 			)
 			defer func() {
@@ -1191,9 +1195,12 @@ func dockerdArgs(link, cidr string, isNoSpace bool) ([]string, error) {
 	// 3) The default may conflict with existing internal network resources, and an operator may wish to override it.
 	dockerBip, prefixLen := dockerutil.BridgeIPFromCIDR(cidr)
 
+	// Docker's debug API logs include request bodies such as inner-container
+	// environment variables. Keep the daemon at info even when Envbox's own
+	// diagnostic logging is enabled.
 	args := []string{
-		"--debug",
-		"--log-level=debug",
+		"--debug=false",
+		"--log-level=info",
 		fmt.Sprintf("--mtu=%d", mtu),
 		"--userns-remap=coder",
 		"--storage-driver=overlay2",
