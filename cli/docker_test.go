@@ -476,6 +476,43 @@ exec "$0" "$@"
 		require.Equal(t, cli.UserNamespaceOffset+1002, owner.GID)
 	})
 
+	t.Run("SharedMemoryMountIsWorldWritableAndSticky", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cmd := clitest.New(t, "docker",
+			"docker",
+			"--image=ubuntu",
+			"--username=coder",
+			"--agent-token=hi",
+			"--mounts=/dev/shm:/dev/shm",
+		)
+
+		fs := clitest.FS(ctx)
+		err := fs.MkdirAll("/dev/shm", 0o755)
+		require.NoError(t, err)
+
+		client := clitest.DockerClient(t, ctx)
+		client.ContainerExecAttachFn = func(_ context.Context, _ string, _ container.ExecAttachOptions) (dockertypes.HijackedResponse, error) {
+			return dockertypes.HijackedResponse{
+				Reader: bufio.NewReader(strings.NewReader("coder:x:1001:1002:coder:/home/coder:/bin/bash")),
+				Conn:   &net.IPConn{},
+			}, nil
+		}
+
+		err = cmd.ExecuteContext(ctx)
+		require.NoError(t, err)
+
+		info, err := fs.Stat("/dev/shm")
+		require.NoError(t, err)
+		require.Equal(t, os.FileMode(0o777), info.Mode().Perm())
+		require.NotZero(t, info.Mode()&os.ModeSticky)
+
+		owner, ok := fs.GetFileOwner("/dev/shm")
+		require.True(t, ok)
+		require.Equal(t, cli.UserNamespaceOffset, owner.UID)
+		require.Equal(t, cli.UserNamespaceOffset, owner.GID)
+	})
+
 	// Test that we remount /sys once we pull the image so that
 	// sysbox can use it properly.
 	t.Run("RemountSysfs", func(t *testing.T) {

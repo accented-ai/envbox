@@ -151,10 +151,14 @@ cat "/sys/fs/fuse/connections/${connection}/waiting"`},
 		secretDir := filepath.Join(tmpdir, "secrets")
 		err = os.MkdirAll(secretDir, 0o777)
 		require.NoError(t, err)
+		sharedMemoryDir := filepath.Join(tmpdir, "dev-shm")
+		err = os.MkdirAll(sharedMemoryDir, 0o755)
+		require.NoError(t, err)
 
 		binds = append(binds,
 			integrationtest.BindMount(homeDir, "/home/coder", false),
 			integrationtest.BindMount(secretDir, "/var/secrets", true),
+			integrationtest.BindMount(sharedMemoryDir, "/dev/shm", false),
 		)
 
 		var (
@@ -174,7 +178,7 @@ cat "/sys/fs/fuse/connections/${connection}/waiting"`},
 				"TEST_ME_PLS=hmm",
 				"TEST_VAR=hello=world",
 				// Add a mount mapping to the inner container.
-				fmt.Sprintf("%s=%s:%s,%s:%s:ro", cli.EnvMounts, "/home/coder", "/home/coder", "/var/secrets", "/var/secrets"),
+				fmt.Sprintf("%s=%s:%s,%s:%s:ro,%s:%s", cli.EnvMounts, "/home/coder", "/home/coder", "/var/secrets", "/var/secrets", "/dev/shm", "/dev/shm"),
 				fmt.Sprintf("%s=%s", cli.EnvMemory, expectedMemoryLimit),
 				fmt.Sprintf("%s=%d", cli.EnvCPUs, expectedCPULimit),
 				fmt.Sprintf("%s=%s", cli.EnvInnerHostname, expectedHostname),
@@ -253,6 +257,20 @@ cat "/sys/fs/fuse/connections/${connection}/waiting"`},
 		_, err = integrationtest.ExecInnerContainer(t, pool, integrationtest.ExecConfig{
 			ContainerID: resource.Container.ID,
 			Cmd:         []string{"touch", "/home/coder/foo"},
+			User:        "coder",
+		})
+		require.NoError(t, err)
+
+		sharedMemoryMode, err := integrationtest.ExecInnerContainer(t, pool, integrationtest.ExecConfig{
+			ContainerID: resource.Container.ID,
+			Cmd:         []string{"stat", "--format=%a", "/dev/shm"},
+		})
+		require.NoError(t, err)
+		require.Equal(t, "1777", strings.TrimSpace(string(sharedMemoryMode)))
+
+		_, err = integrationtest.ExecInnerContainer(t, pool, integrationtest.ExecConfig{
+			ContainerID: resource.Container.ID,
+			Cmd:         []string{"touch", "/dev/shm/non-root-write"},
 			User:        "coder",
 		})
 		require.NoError(t, err)

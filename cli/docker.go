@@ -650,9 +650,11 @@ func runDockerCVM(ctx context.Context, log slog.Logger, client dockerutil.Client
 			continue
 		}
 
+		mountMode, mountModeLabel := mountPermissions(m)
+
 		log.Debug(ctx, "chmod'ing directory",
 			slog.F("path", m.Source),
-			slog.F("mode", "02755"),
+			slog.F("mode", mountModeLabel),
 		)
 
 		// If a mount is read-only we have to remount it rw so that we
@@ -666,7 +668,7 @@ func runDockerCVM(ctx context.Context, log slog.Logger, client dockerutil.Client
 			}
 		}
 
-		err := fs.Chmod(m.Source, 0o2755)
+		err := fs.Chmod(m.Source, mountMode)
 		if err != nil {
 			return dockerCVMResult{}, xerrors.Errorf("chmod mountpoint %q: %w", m.Source, err)
 		}
@@ -1369,6 +1371,16 @@ func defaultMounts() []xunix.Mount {
 func isPrivateMount(m xunix.Mount) bool {
 	_, ok := envboxPrivateMounts[m.Mountpoint]
 	return ok
+}
+
+func mountPermissions(m xunix.Mount) (os.FileMode, string) {
+	if filepath.Clean(m.Mountpoint) == "/dev/shm" {
+		// POSIX shared memory and named semaphores require non-root users
+		// to create objects directly under this conventional mountpoint.
+		return os.ModeSticky | 0o777, "01777"
+	}
+
+	return 0o2755, "02755"
 }
 
 func isHomeDir(fpath string) bool {
