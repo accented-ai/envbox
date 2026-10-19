@@ -9,9 +9,11 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	dockertypes "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/common"
@@ -210,25 +212,16 @@ if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
 		# that retain references to the inherited mount. A lazy detach keeps
 		# retained references valid while freeing the mount point for a correctly
 		# rooted replacement.
-		# If neither unmount method can detach the inherited mount, re-enter the
-		# parent cgroup namespace before starting dockerd. This keeps the namespace
-		# and mount aligned, preserving workspace functionality at the cost of
-		# potentially incorrect inner container cgroup attribution.
 		if ! umount /sys/fs/cgroup; then
 			echo "envbox: normal umount of /sys/fs/cgroup failed; trying lazy detach" >&2
 			if ! umount -l /sys/fs/cgroup; then
-				echo "envbox: failed to detach /sys/fs/cgroup; falling back to the original cgroup namespace (inner container cgroup attribution may be incorrect)" >&2
-				# exec replaces this shell, so the remount and nesting setup below
-				# are not run.
-				exec nsenter --target "$PPID" --cgroup -- "$0" "$@"
+				echo "envbox: failed to detach /sys/fs/cgroup" >&2
+				exit 1
 			fi
 		fi
 		mount -t cgroup2 cgroup /sys/fs/cgroup || { echo "envbox: failed to mount cgroup2 on /sys/fs/cgroup" >&2; exit 1; }
 		cgroup_mount_root=$(get_cgroup_mount_root)
 		if [ "$cgroup_mount_root" != "/" ]; then
-			# The inherited mount is already detached, so re-entering the parent
-			# cgroup namespace would not restore the original namespace/mount
-			# alignment.
 			echo "envbox: cgroup2 mount root is '$cgroup_mount_root' after remount" >&2
 			exit 1
 		fi
@@ -868,14 +861,47 @@ func TestWrapDockerdCmd(t *testing.T) {
 	require.Contains(t, script, `if [ "$(get_cgroup_mount_root)" != "/" ]; then`)
 	require.Contains(t, script, "if ! umount /sys/fs/cgroup")
 	require.Contains(t, script, "umount -l /sys/fs/cgroup")
-	require.Contains(t, script, "falling back to the original cgroup namespace")
-	require.Contains(t, script, `exec nsenter --target "$PPID" --cgroup -- "$0" "$@"`)
 	require.Contains(t, script, "mount -t cgroup2 cgroup /sys/fs/cgroup")
-	require.Contains(t, script, "inner container cgroup attribution may be incorrect")
 	require.Contains(t, script, "mkdir -p /sys/fs/cgroup/init")
 	require.Contains(t, script, "/sys/fs/cgroup/cgroup.subtree_control")
 	require.Contains(t, script, `ge "$envbox_max_attempts" ]`)
 	require.Contains(t, script, `exec "$0" "$@"`)
+}
+
+func TestWrapDockerdCmdDetachFailure(t *testing.T) {
+	t.Parallel()
+
+	fixture := t.TempDir()
+	cgroupDir := filepath.Join(fixture, "cgroup")
+	binDir := filepath.Join(fixture, "bin")
+	logPath := filepath.Join(fixture, "commands")
+	require.NoError(t, os.MkdirAll(cgroupDir, 0o700))
+	require.NoError(t, os.Mkdir(binDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(cgroupDir, "cgroup.controllers"), nil, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "awk"), []byte("#!/bin/sh\nprintf '/nested\\n'\n"), 0o600))
+	require.NoError(t, os.Chmod(filepath.Join(binDir, "awk"), 0o700))
+	for _, name := range []string{"umount", "mount", "nsenter", "dockerd"} {
+		status := "0"
+		if name == "umount" {
+			status = "1"
+		}
+		mock := "#!/bin/sh\nprintf '%s\\n' \"${0##*/} $*\" >> \"$WRAPPER_TEST_LOG\"\nexit " + status + "\n"
+		require.NoError(t, os.WriteFile(filepath.Join(binDir, name), []byte(mock), 0o600))
+		require.NoError(t, os.Chmod(filepath.Join(binDir, name), 0o700))
+	}
+
+	_, args := cli.WrapDockerdCmd(nil)
+	script := strings.ReplaceAll(args[3], "/sys/fs/cgroup", cgroupDir)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script, "dockerd")
+	cmd.Env = append(os.Environ(), "PATH="+binDir+":"+os.Getenv("PATH"), "WRAPPER_TEST_LOG="+logPath)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, ctx.Err())
+	require.Error(t, err, string(output))
+	commands, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	require.Equal(t, "umount "+cgroupDir+"\numount -l "+cgroupDir+"\n", string(commands))
 }
 
 // rawDockerAuth is sample input for a kubernetes secret to a gcr.io private
