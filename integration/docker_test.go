@@ -64,6 +64,26 @@ func TestDocker(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, []string{"165535", "165535"}, strings.Fields(string(ids)))
 
+			// Keep the ancestor-owned PID namespace during the nested proc bind.
+			_, err = integrationtest.ExecEnvbox(t, pool, integrationtest.ExecConfig{
+				ContainerID: resource.Container.ID,
+				Cmd: []string{"docker", "exec", "--user", "1000:1000", cli.InnerContainerName, "/bin/sh", "-ec", `test "$(id -u)" = 1000
+test "$(id -g)" = 1000
+target=$(mktemp -d)
+trap 'rmdir "$target"' EXIT
+parent_userns=$(readlink /proc/self/ns/user)
+parent_pidns=$(readlink /proc/self/ns/pid)
+timeout --signal=KILL 10s unshare --user --map-root-user --mount /bin/sh -ec '
+	test "$(id -u)" = 0
+	test "$(id -g)" = 0
+	test "$(readlink /proc/self/ns/user)" != "$2"
+	test "$(readlink /proc/self/ns/pid)" = "$3"
+	mount --rbind /proc "$1"
+	test "$(sed -n "s/^Pid:[[:space:]]*//p" "$1/$$/status")" = "$$"
+' sh "$target" "$parent_userns" "$parent_pidns"`},
+			})
+			require.NoError(t, err)
+
 			// Assert that we can run docker in the inner container.
 			_, err = integrationtest.ExecInnerContainer(t, pool, integrationtest.ExecConfig{
 				ContainerID: resource.Container.ID,
