@@ -249,15 +249,19 @@ func startEnvboxCmd(ctx context.Context, t *testing.T, innerImage, innerUser str
 	t.Cleanup(func() {
 		if t.Failed() {
 			// Dump the logs if the test failed.
-			logsCmd := exec.Command("docker", "logs", containerID)
+			logsCtx, logsCancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+			logsCmd := exec.CommandContext(logsCtx, "docker", "logs", containerID)
 			out, err := logsCmd.CombinedOutput()
+			logsCancel()
 			if err != nil {
 				t.Logf("failed to read logs: %s", err)
 			}
 			t.Logf("envbox logs:\n%s", string(out))
 		}
 		// Stop the envbox container.
-		stopEnvboxCmd := exec.Command("docker", "rm", "-f", containerID)
+		stopCtx, stopCancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer stopCancel()
+		stopEnvboxCmd := exec.CommandContext(stopCtx, "docker", "rm", "-f", containerID)
 		out, err := stopEnvboxCmd.CombinedOutput()
 		if err != nil {
 			t.Errorf("failed to stop envbox container: %s", out)

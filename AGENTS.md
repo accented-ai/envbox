@@ -539,7 +539,7 @@ docker exec -it <outer-container-id> docker logs workspace_cvm
 
 ### Linting
 
-- **golangci-lint v1.64.8** runs in CI
+- **golangci-lint v2.15.0** runs in CI
 - **shellcheck** for shell scripts
 - **gofumpt** for Go formatting (stricter than gofmt)
 - **markdownfmt** for Markdown files

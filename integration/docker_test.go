@@ -417,13 +417,14 @@ cat "/sys/fs/fuse/connections/${connection}/waiting"`},
 
 		// Create some listeners for the Docker and Coder
 		// services we'll be running with self signed certs.
+		listenConfig := net.ListenConfig{}
 		bridgeIP := integrationtest.DockerBridgeIP(t)
-		coderListener, err := net.Listen("tcp", fmt.Sprintf("%s:0", bridgeIP))
+		coderListener, err := listenConfig.Listen(t.Context(), "tcp", fmt.Sprintf("%s:0", bridgeIP))
 		require.NoError(t, err)
 		defer coderListener.Close()
 		coderAddr := tcpAddr(t, coderListener)
 
-		registryListener, err := net.Listen("tcp", fmt.Sprintf("%s:0", bridgeIP))
+		registryListener, err := listenConfig.Listen(t.Context(), "tcp", fmt.Sprintf("%s:0", bridgeIP))
 		require.NoError(t, err)
 		err = registryListener.Close()
 		require.NoError(t, err)
@@ -511,13 +512,14 @@ cat "/sys/fs/fuse/connections/${connection}/waiting"`},
 
 		// Create some listeners for the Docker and Coder
 		// services we'll be running with self signed certs.
+		listenConfig := net.ListenConfig{}
 		bridgeIP := integrationtest.DockerBridgeIP(t)
-		coderListener, err := net.Listen("tcp", fmt.Sprintf("%s:0", bridgeIP))
+		coderListener, err := listenConfig.Listen(t.Context(), "tcp", fmt.Sprintf("%s:0", bridgeIP))
 		require.NoError(t, err)
 		defer coderListener.Close()
 		coderAddr := tcpAddr(t, coderListener)
 
-		registryListener, err := net.Listen("tcp", fmt.Sprintf("%s:0", bridgeIP))
+		registryListener, err := listenConfig.Listen(t.Context(), "tcp", fmt.Sprintf("%s:0", bridgeIP))
 		require.NoError(t, err)
 		err = registryListener.Close()
 		require.NoError(t, err)
@@ -607,13 +609,14 @@ cat "/sys/fs/fuse/connections/${connection}/waiting"`},
 
 		// Create some listeners for the Docker and Coder
 		// services we'll be running with self signed certs.
+		listenConfig := net.ListenConfig{}
 		bridgeIP := integrationtest.DockerBridgeIP(t)
-		coderListener, err := net.Listen("tcp", fmt.Sprintf("%s:0", bridgeIP))
+		coderListener, err := listenConfig.Listen(t.Context(), "tcp", fmt.Sprintf("%s:0", bridgeIP))
 		require.NoError(t, err)
 		defer coderListener.Close()
 		coderAddr := tcpAddr(t, coderListener)
 
-		registryListener, err := net.Listen("tcp", fmt.Sprintf("%s:0", bridgeIP))
+		registryListener, err := listenConfig.Listen(t.Context(), "tcp", fmt.Sprintf("%s:0", bridgeIP))
 		require.NoError(t, err)
 		err = registryListener.Close()
 		require.NoError(t, err)
@@ -682,8 +685,9 @@ cat "/sys/fs/fuse/connections/${connection}/waiting"`},
 		require.NoError(t, err)
 
 		// Create a listener for the Coder service with a self-signed cert.
+		listenConfig := net.ListenConfig{}
 		bridgeIP := integrationtest.DockerBridgeIP(t)
-		coderListener, err := net.Listen("tcp", fmt.Sprintf("%s:0", bridgeIP))
+		coderListener, err := listenConfig.Listen(t.Context(), "tcp", fmt.Sprintf("%s:0", bridgeIP))
 		require.NoError(t, err)
 		defer coderListener.Close()
 		coderAddr := tcpAddr(t, coderListener)

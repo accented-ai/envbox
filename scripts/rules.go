@@ -10,7 +10,7 @@
 // You run one of the following commands to execute your go rules only:
 //
 //	golangci-lint run
-//	golangci-lint run --disable-all --enable=gocritic
+//	golangci-lint run --enable-only=gocritic
 //
 // Note: don't forget to run `golangci-lint cache clean`!
 package gorules
@@ -21,7 +21,7 @@ import (
 
 // Use xerrors everywhere! It provides additional stacktrace info!
 //
-//nolint:unused,deadcode,varnamelen
+//nolint:unused,varnamelen
 func xerrors(m dsl.Matcher) {
 	m.Import("errors")
 	m.Import("fmt")

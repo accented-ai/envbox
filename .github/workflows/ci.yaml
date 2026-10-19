@@ -43,17 +43,11 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Check for Go linting errors!
-      #
-      # Build golangci-lint v1.64.8 from source with the Go version selected
-      # from go.mod. Its pre-built binary uses an older Go toolchain and cannot
-      # analyze a module targeting Go 1.26.9.
       - name: Lint Go
-        uses: golangci/golangci-lint-action@v6.1.1
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v1.64.8
-          install-mode: goinstall
-          args: "--out-${NO_FUTURE}format colored-line-number"
+          version: v2.15.0
+          args: --fix=false
 
       - name: Lint shell scripts
         uses: ludeeus/action-shellcheck@2.0.0

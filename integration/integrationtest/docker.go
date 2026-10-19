@@ -579,8 +579,10 @@ func pushLocalImage(t *testing.T, pool *dockertest.Pool, opts pushOptions) Regis
 	// Idk what to tell you but the pool.Client.PushImage
 	// function is bugged or I'm just dumb...
 	image := fmt.Sprintf("%s:%s/%s:%s", registryHost, port, name, tag)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+	defer cancel()
 	//nolint:gosec
-	cmd := exec.Command("docker", "--config", opts.ConfigDir, "push", image)
+	cmd := exec.CommandContext(ctx, "docker", "--config", opts.ConfigDir, "push", image)
 	cmd.Stderr = tw
 	cmd.Stdout = tw
 	err = cmd.Run()

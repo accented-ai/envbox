@@ -2,7 +2,6 @@ package dockerutil
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"os"
 
@@ -50,11 +49,7 @@ func ExtractClient(ctx context.Context) (Client, error) {
 type AuthConfig registry.AuthConfig
 
 func (a AuthConfig) Base64() (string, error) {
-	authStr, err := json.Marshal(a)
-	if err != nil {
-		return "", xerrors.Errorf("json marshal: %w", err)
-	}
-	return base64.URLEncoding.EncodeToString(authStr), nil
+	return registry.EncodeAuthConfig(registry.AuthConfig(a))
 }
 
 func AuthConfigFromPath(path string, reg string) (AuthConfig, error) {
