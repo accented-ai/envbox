@@ -101,10 +101,13 @@ RUN useradd coder \
       --shell=/bin/bash \
       --groups=docker \
       --uid=1000 \
-      --user-group && \
-    usermod coder \
-      --add-subuids 100000-165535 \
-      --add-subgids 100000-165535
+      --user-group \
+      --key SUB_UID_MIN=100000 \
+      --key SUB_UID_MAX=362143 \
+      --key SUB_UID_COUNT=262144 \
+      --key SUB_GID_MIN=100000 \
+      --key SUB_GID_MAX=362143 \
+      --key SUB_GID_COUNT=262144
 
 # Do this last so hotswapping is fast!
 ARG ENVBOX_BIN=envbox

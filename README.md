@@ -6,6 +6,10 @@
 
 It mainly acts as a wrapper for the excellent [sysbox runtime](https://github.com/nestybox/sysbox/) developed by [Nestybox](https://www.nestybox.com/). For more details on the security of `sysbox` containers see sysbox's [official documentation](https://github.com/nestybox/sysbox/blob/master/docs/user-guide/security.md).
 
+The inner container has 262144 user and group IDs, mapped from inner IDs 0–262143 to outer IDs 100000–362143, so nested rootless builders can request subordinate IDs 100000–165535.
+
+The mapping offset remains 100000, so existing low-ID file ownership and the workspace user's UID/GID 1000 retain their mappings.
+
 ## Envbox Configuration
 
 The environment variables can be used to configure various aspects of the inner and outer container.

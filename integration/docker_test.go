@@ -48,6 +48,22 @@ func TestDocker(t *testing.T) {
 			// Wait for the inner container's docker daemon.
 			integrationtest.WaitForCVMDocker(t, pool, resource, time.Minute)
 
+			for _, path := range []string{"/proc/self/uid_map", "/proc/self/gid_map"} {
+				mapping, err := integrationtest.ExecInnerContainer(t, pool, integrationtest.ExecConfig{
+					ContainerID: resource.Container.ID,
+					Cmd:         []string{"cat", path},
+				})
+				require.NoError(t, err)
+				require.Equal(t, []string{"0", "100000", "262144"}, strings.Fields(string(mapping)), path)
+			}
+
+			ids, err := integrationtest.ExecEnvbox(t, pool, integrationtest.ExecConfig{
+				ContainerID: resource.Container.ID,
+				Cmd:         []string{"docker", "exec", "--user", "165535:165535", cli.InnerContainerName, "/bin/sh", "-ec", "id -u; id -g"},
+			})
+			require.NoError(t, err)
+			require.Equal(t, []string{"165535", "165535"}, strings.Fields(string(ids)))
+
 			// Assert that we can run docker in the inner container.
 			_, err = integrationtest.ExecInnerContainer(t, pool, integrationtest.ExecConfig{
 				ContainerID: resource.Container.ID,
