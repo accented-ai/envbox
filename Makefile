@@ -11,7 +11,7 @@ GOARCH := $(word 2,$(subst /, ,$(ARCH)))
 SYSBOX_SOURCE_LOCK := deploy/sysbox-source.lock
 include $(SYSBOX_SOURCE_LOCK)
 SYSBOX_SHA ?= $(SYSBOX_SHA_$(GOOS)_$(GOARCH))
-SYSBOX_FS_COMMIT := e21336ddcd1fe9593c028b341d8d3209e683a9cb
+SYSBOX_FS_COMMIT := 98cdcfe84fe3cb37d44c0fc0a6e534b2d43df1ac
 SYSBOX_FS_DIR ?= ../sysbox-fs
 SYSBOX_FS_REPO ?= https://github.com/accented-ai/sysbox-fs.git
 SYSBOX_IPC_REPO ?= https://github.com/nestybox/sysbox-ipc.git

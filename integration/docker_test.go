@@ -64,7 +64,7 @@ func TestDocker(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, []string{"165535", "165535"}, strings.Fields(string(ids)))
 
-			// Keep the ancestor-owned PID namespace during the nested proc bind.
+			// Keep the ancestor-owned PID namespace during nested proc mounts.
 			_, err = integrationtest.ExecEnvbox(t, pool, integrationtest.ExecConfig{
 				ContainerID: resource.Container.ID,
 				Cmd: []string{"docker", "exec", "--user", "1000:1000", cli.InnerContainerName, "/bin/sh", "-ec", `test "$(id -u)" = 1000
@@ -73,14 +73,37 @@ target=$(mktemp -d)
 trap 'rmdir "$target"' EXIT
 parent_userns=$(readlink /proc/self/ns/user)
 parent_pidns=$(readlink /proc/self/ns/pid)
-timeout --signal=KILL 10s unshare --user --map-root-user --mount /bin/sh -ec '
+export LIBMOUNT_FORCE_MOUNT2=always
+timeout --signal=KILL 10s unshare --user --map-root-user --mount /bin/sh -es -- "$target" "$parent_userns" "$parent_pidns" <<'BIND'
 	test "$(id -u)" = 0
 	test "$(id -g)" = 0
 	test "$(readlink /proc/self/ns/user)" != "$2"
 	test "$(readlink /proc/self/ns/pid)" = "$3"
 	mount --rbind /proc "$1"
-	test "$(sed -n "s/^Pid:[[:space:]]*//p" "$1/$$/status")" = "$$"
-' sh "$target" "$parent_userns" "$parent_pidns"`},
+	test "$(sed -n 's/^Pid:[[:space:]]*//p' "$1/$$/status")" = "$$"
+	awk -v p="$1/uptime" '$5 == p && $6 ~ /(^|,)rw(,|$)/ && / - fuse sysboxfs / {ok=1} END {exit !ok}' /proc/self/mountinfo
+	mount -o remount,bind,ro,nosuid,nodev,noexec,relatime /proc/uptime "$1/uptime"
+	awk -v p="$1/uptime" '$5 == p && $6 ~ /(^|,)ro(,|$)/ {ok=1} END {exit !ok}' /proc/self/mountinfo
+	unshare --user --map-root-user --mount /bin/sh -es -- "$1" "$(readlink /proc/self/ns/user)" "$3" <<'REMOUNT'
+		test "$(id -u)" = 0
+		test "$(id -g)" = 0
+		test "$(readlink /proc/self/ns/user)" != "$2"
+		test "$(readlink /proc/self/ns/pid)" = "$3"
+		mount -o remount,rbind,nosuid,nodev,noexec,relatime /proc "$1"
+		awk -v p="$1" '$5 == p {
+			n=split($6,a,","); for(i=1;i<=n;i++) f[a[i]]=1
+			ok=f["rw"] && f["nosuid"] && f["nodev"] && f["noexec"] && f["relatime"]
+		} END {exit !ok}' /proc/self/mountinfo
+		test "$(sed -n 's/^Pid:[[:space:]]*//p' "$1/$$/status")" = "$$"
+		test -n "$(cat "$1/uptime")"
+		awk -v p="$1/uptime" '$5 == p && $6 ~ /(^|,)ro(,|$)/ {ok=1} END {exit !ok}' /proc/self/mountinfo
+		if mount -o remount,bind,nosuid,nodev,noexec,relatime /proc/uptime "$1/uptime"; then
+			echo 'Locked proc child became writable' >&2
+			exit 1
+		fi
+		awk -v p="$1/uptime" '$5 == p && $6 ~ /(^|,)ro(,|$)/ {ok=1} END {exit !ok}' /proc/self/mountinfo
+REMOUNT
+BIND`},
 			})
 			require.NoError(t, err)
 
