@@ -383,7 +383,7 @@ All configuration uses `CODER_*` prefixed environment variables. See README.md f
 
 ### Docker and System Dependencies
 
-- **Docker CE 29.2.1** - Pinned in Dockerfile
+- **Docker CE 29.9.1** - Pinned in Dockerfile
 - **sysbox 0.7.1** - Downloaded and verified via SHA256 in Dockerfile
 - **Linux kernel** - Requires seccomp API level >= 5
 - **Ubuntu 22.04 (Jammy)** - Base image
