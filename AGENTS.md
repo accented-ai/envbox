@@ -107,7 +107,7 @@ The entire premise of envbox is providing secure system-level capabilities witho
 
 ### Prerequisites
 
-- Go 1.24+
+- Go 1.26.9+
 - Docker installed
 - **VM or physical machine** for integration tests (Docker-in-Docker won't work for testing envbox)
 - Linux kernel with seccomp API level >= 5
@@ -375,7 +375,7 @@ All configuration uses `CODER_*` prefixed environment variables. See README.md f
 
 ### Go Dependencies
 
-- **Go 1.24+** required for Envbox (see `go.mod`); the pinned Sysbox source build uses Go 1.25
+- **Go 1.26.9+** required for Envbox (see `go.mod`); the pinned Sysbox source build uses Go 1.26.9
 - **Docker API client** pinned to specific version (avoid breaking changes)
 - **coder/coder v2.14.4** - Main Coder integration
 - **coder/tailscale fork** - Not important to agents; version should match coder/coder's go.mod

@@ -47,7 +47,7 @@ jobs:
       #
       # Build golangci-lint v1.64.8 from source with the Go version selected
       # from go.mod. Its pre-built binary uses an older Go toolchain and cannot
-      # analyze a module targeting Go 1.26.6.
+      # analyze a module targeting Go 1.26.9.
       - name: Lint Go
         uses: golangci/golangci-lint-action@v6.1.1
         with:
