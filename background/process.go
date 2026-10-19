@@ -178,10 +178,13 @@ func (d *Process) startProcess() error {
 	cmd.SetStdout(mw)
 	cmd.SetStderr(mw)
 
-	go scanIntoLog(d.ctx, d.log, bufio.NewScanner(pr), d.binName)
+	go scanIntoLog(d.ctx, d.log, pr, d.binName)
 
-	err := d.cmd.Start()
+	err := cmd.Start()
 	if err != nil {
+		cancel()
+		_ = pw.Close()
+		_ = pr.Close()
 		return xerrors.Errorf("start: %w", err)
 	}
 
@@ -193,6 +196,7 @@ func (d *Process) startProcess() error {
 
 		err := cmd.Wait()
 		_ = psw.Flush()
+		_ = pw.Close()
 
 		// If the user killed the application the actual error returned
 		// from wait doesn't really matter.
@@ -286,7 +290,9 @@ func isProcExited(fs afero.Fs, pid int, cmd string) (bool, error) {
 	return cmd != string(args[0]), nil
 }
 
-func scanIntoLog(ctx context.Context, log slog.Logger, scanner *bufio.Scanner, binaryName string) {
+func scanIntoLog(ctx context.Context, log slog.Logger, reader io.ReadCloser, binaryName string) {
+	defer reader.Close()
+	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
