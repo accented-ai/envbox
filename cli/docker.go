@@ -879,8 +879,7 @@ func runDockerCVM(ctx context.Context, log slog.Logger, client dockerutil.Client
 			defer resp.Close()
 			<-ctx.Done()
 		}()
-		rd := io.LimitReader(resp.Reader, 1<<10)
-		_, err := io.Copy(blog, rd)
+		err := drainBootstrapOutput(blog, resp.Reader)
 		if err != nil {
 			log.Error(ctx, "copy bootstrap output", slog.Error(err))
 		}
@@ -893,6 +892,17 @@ func runDockerCVM(ctx context.Context, log slog.Logger, client dockerutil.Client
 		bootstrapExecID:  bootstrapExec.ID,
 		bootstrapHostDir: bootstrapHostDir,
 	}, nil
+}
+
+func drainBootstrapOutput(log io.Writer, output io.Reader) error {
+	_, err := io.Copy(log, io.LimitReader(output, 1<<10))
+	// Closing the Docker attachment at the log limit breaks the running
+	// bootstrap's output streams. Keep draining until it exits or shuts down.
+	_, drainErr := io.Copy(io.Discard, output)
+	if err != nil {
+		return err
+	}
+	return drainErr
 }
 
 func shutdownDockerCVM(log slog.Logger, client dockerutil.Client, result dockerCVMResult, innerContainerStopTimeout time.Duration, processes dockerCVMProcesses) {

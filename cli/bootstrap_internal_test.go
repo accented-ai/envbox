@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +14,29 @@ import (
 
 	"github.com/coder/envbox/xunix"
 )
+
+func TestBootstrapOutputKeepsAttachmentOpenAfterLogLimit(t *testing.T) {
+	t.Parallel()
+	output, writer := io.Pipe()
+	var logged bytes.Buffer
+	drained := make(chan error, 1)
+	go func() {
+		defer output.Close()
+		drained <- drainBootstrapOutput(&logged, output)
+	}()
+	for _, message := range []string{strings.Repeat("a", 2048), "agent still running\n"} {
+		_, err := io.WriteString(writer, message)
+		require.NoError(t, err)
+	}
+	select {
+	case err := <-drained:
+		t.Fatalf("bootstrap attachment closed before process exit: %v", err)
+	default:
+	}
+	require.NoError(t, writer.Close())
+	require.NoError(t, <-drained)
+	require.Equal(t, strings.Repeat("a", 1024), logged.String())
+}
 
 func TestHostPathForInnerPath(t *testing.T) {
 	t.Parallel()

@@ -251,6 +251,12 @@ cat "/sys/fs/fuse/connections/${connection}/waiting"`},
 		// this under the home directory to avoid the race where systemd
 		// remounts /tmp while the agent binary is downloading.
 		bootstrapScript := `#!/usr/bin/env bash
+			set -e
+			# Continue writing past the log limit and pipe buffers before
+			# marking readiness, so a detached output stream fails startup.
+			for _ in {1..2048}; do
+				printf '%1024s\n' bootstrap-output
+			done
 
 			echo "hello" > /home/coder/bootstrap
 			echo "${BINARY_DIR}" > /home/coder/bootstrap-dir
