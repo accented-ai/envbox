@@ -1,6 +1,8 @@
 package integration_test
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -12,7 +14,10 @@ import (
 	"time"
 
 	dockertest "github.com/ory/dockertest/v3"
+	"github.com/ory/dockertest/v3/docker"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 
 	"github.com/coder/envbox/cli"
 	"github.com/coder/envbox/dockerutil"
@@ -207,6 +212,13 @@ cat "/sys/fs/fuse/connections/${connection}/waiting"`},
 		homeDir := filepath.Join(tmpdir, "home")
 		err = os.MkdirAll(homeDir, 0o777)
 		require.NoError(t, err)
+		gatePath := filepath.Join(homeDir, "bootstrap-output-gate")
+		require.NoError(t, unix.Mkfifo(gatePath, 0o644))
+		// The shifted inner user must be able to read despite the host umask.
+		require.NoError(t, os.Chmod(gatePath, 0o644))
+		gate, err := os.OpenFile(gatePath, os.O_RDWR, 0)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = gate.Close() })
 
 		// Emulate someone wanting to mount a secret into envbox.
 		secretDir := filepath.Join(tmpdir, "secrets")
@@ -250,18 +262,27 @@ cat "/sys/fs/fuse/connections/${connection}/waiting"`},
 		// unique directory that ultimately hosts the agent for Coder. We keep
 		// this under the home directory to avoid the race where systemd
 		// remounts /tmp while the agent binary is downloading.
-		bootstrapScript := `#!/usr/bin/env bash
+		bootstrapScript := `#!/bin/sh
 			set -e
+			exec 3< /home/coder/bootstrap-output-gate
+			printf '%2048s\n' bootstrap-prefix
+			echo 'bootstrap stdout diagnostic'
+			echo 'bootstrap stderr diagnostic' >&2
+			read -r ack <&3
+			[ "$ack" = start ]
+			exec 3<&-
 			# Continue writing past the log limit and pipe buffers before
 			# marking readiness, so a detached output stream fails startup.
-			for _ in {1..2048}; do
+			line=0
+			while [ "$line" -lt 2048 ]; do
 				printf '%1024s\n' bootstrap-output
+				line=$((line + 1))
 			done
 
-			echo "hello" > /home/coder/bootstrap
 			echo "${BINARY_DIR}" > /home/coder/bootstrap-dir
 			mkdir /home/coder/bar
 			touch "${BINARY_DIR}/foo"
+			echo "hello" > /home/coder/bootstrap
 `
 
 		// Run the envbox container.
@@ -276,6 +297,22 @@ cat "/sys/fs/fuse/connections/${connection}/waiting"`},
 			BootstrapScript: bootstrapScript,
 			CPUs:            expectedCPULimit,
 		})
+		const bootstrapTimeout = 10 * time.Second
+		diagnosticsCtx, cancelDiagnostics := context.WithTimeout(t.Context(), bootstrapTimeout)
+		defer cancelDiagnostics()
+		require.EventuallyWithT(t, func(collect *assert.CollectT) {
+			var logs bytes.Buffer
+			if !assert.NoError(collect, pool.Client.Logs(docker.LogsOptions{
+				Context: diagnosticsCtx, Container: resource.Container.ID,
+				Stdout: true, Stderr: true, OutputStream: &logs, ErrorStream: &logs,
+			})) {
+				return
+			}
+			assert.Contains(collect, logs.String(), "bootstrap stdout diagnostic")
+			assert.Contains(collect, logs.String(), "bootstrap stderr diagnostic")
+		}, bootstrapTimeout, 100*time.Millisecond)
+		_, err = gate.WriteString("start\n")
+		require.NoError(t, err)
 
 		// Validate that the envs are set correctly.
 		vars, err := integrationtest.ExecInnerContainer(t, pool, integrationtest.ExecConfig{
@@ -361,14 +398,27 @@ cat "/sys/fs/fuse/connections/${connection}/waiting"`},
 		require.Contains(t, err.Error(), "Read-only file system")
 
 		// Validate that the bootstrap script ran.
-		out, err := integrationtest.ExecInnerContainer(t, pool, integrationtest.ExecConfig{
-			ContainerID: resource.Container.ID,
-			Cmd:         []string{"cat", "/home/coder/bootstrap"},
-		})
-		require.NoError(t, err)
-		require.Equal(t, "hello", strings.TrimSpace(string(out)))
+		require.EventuallyWithT(t, func(collect *assert.CollectT) {
+			out, err := os.ReadFile(filepath.Join(homeDir, "bootstrap"))
+			assert.NoError(collect, err)
+			assert.Equal(collect, "hello", strings.TrimSpace(string(out)))
+		}, bootstrapTimeout, 100*time.Millisecond)
+		logCtx, cancelLogs := context.WithTimeout(t.Context(), bootstrapTimeout)
+		defer cancelLogs()
+		require.EventuallyWithT(t, func(collect *assert.CollectT) {
+			var logs bytes.Buffer
+			if !assert.NoError(collect, pool.Client.Logs(docker.LogsOptions{
+				Context: logCtx, Container: resource.Container.ID,
+				Stdout: true, Stderr: true, OutputStream: &logs, ErrorStream: &logs,
+			})) {
+				return
+			}
+			assert.Contains(collect, logs.String(), "bootstrap stdout diagnostic")
+			assert.Contains(collect, logs.String(), "bootstrap stderr diagnostic")
+			assert.Equal(collect, 1, strings.Count(logs.String(), "Bootstrap output truncated"))
+		}, bootstrapTimeout, 100*time.Millisecond)
 
-		out, err = integrationtest.ExecInnerContainer(t, pool, integrationtest.ExecConfig{
+		out, err := integrationtest.ExecInnerContainer(t, pool, integrationtest.ExecConfig{
 			ContainerID: resource.Container.ID,
 			Cmd:         []string{"cat", "/home/coder/bootstrap-dir"},
 		})

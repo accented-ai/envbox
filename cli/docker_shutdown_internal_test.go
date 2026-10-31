@@ -194,9 +194,11 @@ func TestShutdownBootstrapExecUsesStepDeadline(t *testing.T) {
 func TestShutdownDockerCVMUsesBoundedContext(t *testing.T) {
 	t.Parallel()
 
+	output := &bootstrapOutput{}
 	var stopped bool
 	client := dockerfake.MockClient{
 		ContainerStopFn: func(ctx context.Context, name string, options container.StopOptions) error {
+			require.True(t, output.stopping.Load(), "bootstrap must see intentional shutdown before container stop")
 			stopped = true
 			require.Equal(t, "container-id", name)
 			require.NotNil(t, options.Timeout)
@@ -206,7 +208,7 @@ func TestShutdownDockerCVMUsesBoundedContext(t *testing.T) {
 		},
 	}
 
-	shutdownDockerCVM(slogtest.Make(t, nil), client, dockerCVMResult{containerID: "container-id"}, defaultInnerContainerStopTimeout, dockerCVMProcesses{})
+	shutdownDockerCVM(slogtest.Make(t, nil), client, dockerCVMResult{containerID: "container-id", bootstrapOutput: output}, defaultInnerContainerStopTimeout, dockerCVMProcesses{})
 	require.True(t, stopped)
 }
 

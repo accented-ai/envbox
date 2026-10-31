@@ -163,6 +163,7 @@ type dockerCVMResult struct {
 	containerID      string
 	bootstrapExecID  string
 	bootstrapHostDir string
+	bootstrapOutput  *bootstrapOutput
 }
 
 type managedProcess interface {
@@ -203,12 +204,15 @@ func dockerCmd(lifecycle *lifecycle) *cobra.Command {
 				logLevel = slog.LevelDebug
 			}
 			var (
-				ctx, cancel                 = context.WithCancel(cmd.Context()) //nolint
-				log                         = slog.Make(slogjson.Sink(cmd.ErrOrStderr()), slogkubeterminate.Make()).Leveled(logLevel)
-				blog        buildlog.Logger = buildlog.JSONLogger{Encoder: json.NewEncoder(os.Stderr)}
+				ctx, cancel           = context.WithCancel(cmd.Context()) //nolint
+				coderCtx, coderCancel = context.WithCancel(ctx)
+				coderClient           buildlog.CoderClient
+				log                                   = slog.Make(slogjson.Sink(cmd.ErrOrStderr()), slogkubeterminate.Make()).Leveled(logLevel)
+				blog                  buildlog.Logger = buildlog.JSONLogger{Encoder: json.NewEncoder(cmd.ErrOrStderr())}
 			)
 			defer func() {
 				if err != nil {
+					coderCancel()
 					cancel()
 				}
 			}()
@@ -216,6 +220,7 @@ func dockerCmd(lifecycle *lifecycle) *cobra.Command {
 				log = slog.Make(slogjson.Sink(io.Discard))
 				blog = buildlog.NopLogger{}
 			}
+			startupLog := blog
 
 			// We technically leak a context here, but it's impact is negligible.
 			signalCtx, signalCancel := context.WithCancel(ctx)
@@ -242,19 +247,26 @@ func dockerCmd(lifecycle *lifecycle) *cobra.Command {
 					return xerrors.Errorf("parse coder URL %q: %w", flags.coderURL, err)
 				}
 
-				agent, err := buildlog.OpenCoderClient(ctx, log, coderURL, httpClient, flags.agentToken)
+				agent, err := buildlog.OpenCoderClient(coderCtx, log, coderURL, httpClient, flags.agentToken)
 				if err != nil {
 					// Don't fail workspace startup on
 					// an inability to push build logs.
 					log.Error(ctx, "failed to instantiate coder build log client, no logs will be pushed", slog.Error(err))
 				} else {
+					coderClient = agent
 					blog = buildlog.MultiLogger(
-						buildlog.OpenCoderLogger(ctx, agent, log),
+						buildlog.OpenCoderLogger(coderCtx, agent, log),
 						blog,
 					)
 				}
 			}
-			defer blog.Close()
+			// The JSON done marker ends startup, while Coder logs remain live.
+			defer func() {
+				if err != nil {
+					closeBootstrapLogs(nil, coderClient, coderCancel, time.Now().Add(bootstrapLogShutdownTimeout))
+				}
+				_ = startupLog.Close()
+			}()
 
 			defer func(err *error) {
 				if *err != nil {
@@ -445,11 +457,16 @@ func dockerCmd(lifecycle *lifecycle) *cobra.Command {
 				<-signalCtx.Done()
 				log.Debug(ctx, "ctx canceled, shutting down docker CVM")
 
+				logDeadline := time.Now().Add(dockerCVMShutdownTimeout)
 				shutdownDockerCVM(log, client, result, flags.innerContainerStopTimeout, dockerCVMProcesses{
 					dockerd:       dockerd,
 					sysboxManager: sysboxManager,
 					sysboxFS:      sysboxFS,
 				})
+				if graceDeadline := time.Now().Add(bootstrapLogShutdownTimeout); graceDeadline.Before(logDeadline) {
+					logDeadline = graceDeadline
+				}
+				closeBootstrapLogs(result.bootstrapOutput, coderClient, coderCancel, logDeadline)
 			}()
 
 			return nil
@@ -862,6 +879,11 @@ func runDockerCVM(ctx context.Context, log slog.Logger, client dockerutil.Client
 	if err != nil {
 		return dockerCVMResult{}, xerrors.Errorf("attach exec: %w", err)
 	}
+	defer func() {
+		if cleanupBootstrapOnError {
+			resp.Close()
+		}
+	}()
 
 	_, err = io.Copy(resp.Conn, strings.NewReader(flags.boostrapScript))
 	if err != nil {
@@ -872,40 +894,21 @@ func runDockerCVM(ctx context.Context, log slog.Logger, client dockerutil.Client
 		return dockerCVMResult{}, xerrors.Errorf("close write: %w", err)
 	}
 
-	go func() {
-		defer resp.Close()
-		go func() {
-			// Also close the response reader when the context is canceled.
-			defer resp.Close()
-			<-ctx.Done()
-		}()
-		err := drainBootstrapOutput(blog, resp.Reader)
-		if err != nil {
-			log.Error(ctx, "copy bootstrap output", slog.Error(err))
-		}
-		log.Debug(ctx, "bootstrap output copied")
-	}()
+	output := watchBootstrapOutput(ctx, log, blog, client, bootstrapExec.ID, resp.Reader, resp.Close)
 
 	cleanupBootstrapOnError = false
 	return dockerCVMResult{
 		containerID:      containerID,
 		bootstrapExecID:  bootstrapExec.ID,
 		bootstrapHostDir: bootstrapHostDir,
+		bootstrapOutput:  output,
 	}, nil
 }
 
-func drainBootstrapOutput(log io.Writer, output io.Reader) error {
-	_, err := io.Copy(log, io.LimitReader(output, 1<<10))
-	// Closing the Docker attachment at the log limit breaks the running
-	// bootstrap's output streams. Keep draining until it exits or shuts down.
-	_, drainErr := io.Copy(io.Discard, output)
-	if err != nil {
-		return err
-	}
-	return drainErr
-}
-
 func shutdownDockerCVM(log slog.Logger, client dockerutil.Client, result dockerCVMResult, innerContainerStopTimeout time.Duration, processes dockerCVMProcesses) {
+	if result.bootstrapOutput != nil {
+		result.bootstrapOutput.stopping.Store(true)
+	}
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), dockerCVMShutdownTimeout)
 	defer shutdownCancel()
 
